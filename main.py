@@ -90,7 +90,6 @@ async def run_full_bot():
         return
 
     async with async_playwright() as p:
-        # เปิดหน้าจอเมื่อรันในเครื่อง (Local) และปิดหน้าจอเมื่อรันบน Cloud (GitHub)
         browser = await p.chromium.launch(headless=IS_GITHUB, slow_mo=500 if not IS_GITHUB else 0)
         context = await browser.new_context(viewport={'width': 1366, 'height': 768})
         page = await context.new_page()
@@ -185,11 +184,29 @@ async def run_full_bot():
 
             # 5. สรุปผล (แสดงสถานะวันหยุดชัดเจน)
             is_holiday = "วันหยุด" in shift_info or final_in == "--:--"
-            
             if is_holiday:
                 late_status = "😴 วันหยุด/พักผ่อน"
             else:
                 if final_in != "--:--" and safe_to_minutes(final_in) > 480 and not is_night:
                     late_status = "❌ สาย"
                 else:
-                    late_
+                    late_status = "✅ ไม่สาย"
+
+            full_msg = f"{'🌙' if is_night else '☀️'} *{'กะดึก' if is_night else 'กะเช้า'}* | {TARGET_DATE_STR}\n"
+            full_msg += f"👍 *เข้า:* {final_in}  👋 *ออก:* {final_out} [{late_status}]\n"
+            full_msg += f"🚀 *OT:* {'✅ ✅ ' if '✅' in ot_status else '➖ '}{ot_status}"
+            
+            if target_dt.day == 17:
+                full_msg += "\n\n⚠️ *Note:* วันที่ 17 แล้ว! อย่าลืมเช็ค Biofsoft"
+
+            send_line_notification(full_msg)
+
+        except Exception as e:
+            if IS_GITHUB: await page.screenshot(path="error_debug.png", full_page=True)
+            print(f"❌ Error Detail: {e}")
+            send_line_notification(f"❌ บอททำงานผิดพลาด: {str(e)[:100]}")
+        finally:
+            await browser.close()
+
+if __name__ == "__main__":
+    asyncio.run(run_full_bot())
