@@ -3,10 +3,11 @@ name: Biosoft Auto Check
 on:
   schedule:
     # รันเวลา 10:00, 17:30, 22:00 (เวลาไทย)
+    # GitHub ใช้เวลา UTC (ไทย = UTC+7)
     - cron: '0 3 * * *'    # 10:00 TH
     - cron: '30 10 * * *'  # 17:30 TH
     - cron: '0 15 * * *'   # 22:00 TH
-  workflow_dispatch: # เพื่อให้เรากดรันเองเพื่อทดสอบได้
+  workflow_dispatch: # ปุ่มกดรันเองเพื่อทดสอบ
 
 jobs:
   run-bot:
@@ -31,4 +32,13 @@ jobs:
           BIO_PASS: ${{ secrets.BIO_PASS }}
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          TZ: Asia/Bangkok  # <--- เพิ่มเพื่อให้ระบบจำลองเวลาไทย
         run: python main.py
+
+      - name: Upload Error Screenshot
+        if: failure()  # จะทำงานเฉพาะเมื่อบอทรันพลาด (Error) เท่านั้น
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-debug-screenshot
+          path: error_debug.png  # ชื่อไฟล์ต้องตรงกับในโค้ด Python
+          retention-days: 7      # เก็บไฟล์ไว้ 7 วัน
