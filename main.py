@@ -2,22 +2,22 @@ import asyncio
 import re
 import requests
 import json
-import os  # นำเข้า os เพื่อดึงค่าจาก Secrets
+import os
 from playwright.async_api import async_playwright
 from datetime import datetime, timedelta
 
-# ================= CONFIGURATION (ดึงจาก GitHub Secrets) =================
+# ================= CONFIGURATION (ดึงจาก Secrets) =================
 URL = "http://49.0.120.219:99/"
-USER = os.getenv("BIO_USER")
-PASS = os.getenv("BIO_PASS")
-ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-USER_ID = os.getenv("LINE_USER_ID")
+USER = os.getenv("BIO_USER", "01750")  # ถ้าไม่มี Secret จะใช้ค่า Default นี้
+PASS = os.getenv("BIO_PASS", "01750")
+ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN", "your_token")
+USER_ID = os.getenv("LINE_USER_ID", "your_user_id")
 
 # Logic วันที่: ตรวจสอบของ "เมื่อวาน"
 now = datetime.now()
 yesterday_dt = now - timedelta(days=1)
 TARGET_DATE_STR = yesterday_dt.strftime("%d/%m/%Y") 
-# =========================================================================
+# =================================================================
 
 THAI_MONTHS = {
     "มกราคม": 1, "กุมภาพันธ์": 2, "มีนาคม": 3, "เมษายน": 4,
@@ -65,11 +65,13 @@ def parse_thai_week(text):
 
 async def run_full_bot():
     async with async_playwright() as p:
-        # เน้นการหน่วงเวลาด้วย slow_mo และปรับ timeout เป็น 60 วินาทีเพื่อรองรับเน็ตช้า
-        browser = await p.chromium.launch(headless=True) # ต้องเป็น True เมื่อรันบน GitHub
+        # เปิดแบบ headless สำหรับ GitHub
+        browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={'width': 1366, 'height': 768})
         page = await context.new_page()
-        page.set_default_timeout(60000) # รอโหลดแต่ละจุดสูงสุด 60 วิ
+        
+        # ตั้งค่าเวลารอพื้นฐานเป็น 60 วินาที (จากเดิม 30)
+        page.set_default_timeout(60000)
 
         try:
             target_dt = datetime.strptime(TARGET_DATE_STR, "%d/%m/%Y")
@@ -77,32 +79,39 @@ async def run_full_bot():
             from_date_ot = (target_dt - timedelta(days=2)).strftime("%d/%m/%Y")
             to_date_ot = (target_dt + timedelta(days=2)).strftime("%d/%m/%Y")
 
-            # 1. LOGIN (ใช้การรอแบบ networkidle เพื่อให้มั่นใจว่าหน้าเว็บโหลดครบ)
-            await page.goto(URL, wait_until="networkidle")
+            print(f"🚀 เริ่มตรวจสอบข้อมูลของวันที่: {TARGET_DATE_STR}")
+
+            # 1. LOGIN (เพิ่มการรอแบบเน้นเสถียร)
+            await page.goto(URL, wait_until="load")
             await page.fill('input[placeholder="Username"]', USER)
             await page.fill('input[placeholder="Password"]', PASS)
             await page.click('button:has-text("Login")')
             
-            # รอให้ Dashboard โหลดด้วยการหา Element สำคัญ
-            await page.wait_for_selector("small.ng-binding", timeout=30000)
-            await asyncio.sleep(5) # หน่วงเวลาเพิ่มความเสถียร
+            # รอจนกว่าหน้า Dashboard จะขึ้น (หา Element ที่มั่นใจว่ามาแน่ๆ)
+            await page.wait_for_selector('small.ng-binding', timeout=60000)
+            await asyncio.sleep(5) # แถมเวลาให้เน็ตหายแกว่ง
 
-            # 2. ค้นหาข้อมูลกะงาน
+            # 2. ค้นหาข้อมูลกะงาน (Dashboard)
             shift_info = "ไม่พบข้อมูล"
-            for _ in range(15): # เพิ่มจำนวนรอบการวนหา
+            for _ in range(15): # เพิ่มรอบการค้นหา
+                # รอให้ตัวหนังสือแสดงผลก่อนดึงค่า
+                await page.wait_for_selector("small.ng-binding")
                 all_smalls = await page.locator("small.ng-binding").all_inner_texts()
                 week_text = next((t.strip() for t in all_smalls if any(m in t for m in THAI_MONTHS.keys())), "")
                 start_dt, end_dt = parse_thai_week(week_text)
+                
                 if start_dt and end_dt:
                     target_floor = target_dt.replace(hour=0, minute=0, second=0)
                     if start_dt <= target_floor <= end_dt: break
-                    elif target_floor < start_dt: await page.click('button[ng-click*="pre"]')
-                    else: await page.click('button[ng-click*="next"]')
+                    elif target_floor < start_dt: 
+                        await page.click('button[ng-click*="pre"]')
+                    else: 
+                        await page.click('button[ng-click*="next"]')
                     await page.wait_for_load_state("networkidle")
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(4) # หน่วงเวลาหลังเปลี่ยนหน้า
                 else:
                     await page.click('button[ng-click*="pre"]')
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(5)
 
             day_abbr = target_dt.strftime("%a")
             day_box = page.locator(f"#shiftblock li:has(span:has-text('{day_abbr}'))").first
@@ -111,9 +120,9 @@ async def run_full_bot():
 
             # 3. ดึงข้อมูลสแกนนิ้ว
             await page.click('span:has-text("ข้อมูลเวลา")')
+            await asyncio.sleep(2)
             await page.click('a:has-text("แสดงข้อมูลการบันทึกเวลา")')
-            # รอจนกว่าตารางจะปรากฏ
-            await page.wait_for_selector("table", timeout=30000)
+            await page.wait_for_selector('h2:has-text("ตรวจสอบเวลาสแกนนิ้ว")', timeout=60000)
             await asyncio.sleep(5)
 
             for model, val in [("fromDate", TARGET_DATE_STR), ("toDate", next_day_str)]:
@@ -124,20 +133,23 @@ async def run_full_bot():
                 await asyncio.sleep(2)
 
             await page.click('h2:has-text("ตรวจสอบเวลาสแกนนิ้ว")')
-            await asyncio.sleep(8) # รอโหลดข้อมูลตาราง
+            await asyncio.sleep(10) # Biosoft โหลดข้อมูลตารางช้ามาก ต้องรอนานหน่อย
 
             rows = await page.query_selector_all("table tbody tr")
             raw_times = []
             for row in rows:
                 cols = await row.query_selector_all("td")
                 if len(cols) >= 5:
-                    d, t_in, t_out = (await cols[2].inner_text()).strip(), (await cols[3].inner_text()).strip(), (await cols[4].inner_text()).strip()
+                    d = (await cols[2].inner_text()).strip()
+                    t_in = (await cols[3].inner_text()).strip()
+                    t_out = (await cols[4].inner_text()).strip()
                     if ":" in t_in: raw_times.append((d, t_in))
                     if ":" in t_out: raw_times.append((d, t_out))
 
-            # ประมวลผลเวลา
+            # ประมวลผลเวลาเข้า-ออก
             final_in, final_out = "--:--", "--:--"
             is_night = "20:00" in shift_info
+            
             if is_night:
                 in_c = [t for d, t in raw_times if TARGET_DATE_STR in d and safe_to_minutes(t) >= 1020]
                 if in_c: final_in = in_c[0]
@@ -155,45 +167,49 @@ async def run_full_bot():
             is_doing_ot = False
             if final_out != "--:--":
                 out_h = int(final_out.split(":")[0])
-                if (is_night and out_h >= 6) or (not is_night and out_h >= 18): is_doing_ot = True
+                if (is_night and (out_h >= 6 or out_h < 4)) or (not is_night and out_h >= 18): 
+                    is_doing_ot = True
 
             if is_doing_ot:
                 await page.click('a:has-text("บันทึกขอทำโอที")')
-                await page.wait_for_selector('button[ng-click*="ChangMode(\'All\')"]')
+                await page.wait_for_selector('button[ng-click*="ChangMode(\'All\')"]', timeout=60000)
                 await page.click('button[ng-click*="ChangMode(\'All\')"]')
+                await asyncio.sleep(3)
                 for model, val in [("fromDate", from_date_ot), ("toDate", to_date_ot)]:
                     selector = f'input[ng-model="{model}"]'
                     await page.evaluate(f'document.querySelector(\'{selector}\').removeAttribute("readonly")')
                     await page.fill(selector, val)
                     await page.press(selector, 'Enter')
-                    await asyncio.sleep(2)
                 
                 await page.select_option('select[name*="_length"]', "100")
                 await asyncio.sleep(5)
-                ot_rows = await page.query_selector_all("table tbody tr")
-                ot_found = False
-                for r in ot_rows:
-                    if TARGET_DATE_STR in (await r.inner_text()):
-                        ot_found = True; break
+                ot_rows_text = await page.locator("table tbody tr").all_inner_texts()
+                ot_found = any(TARGET_DATE_STR in r for r in ot_rows_text)
                 ot_status = "✅ มีใบโอทีแล้ว" if ot_found else "❌ ไม่พบใบขอโอที"
 
-            # 5. สรุปรายงาน
+            # 5. สรุปผล
             late_status = "✅ ไม่สาย"
-            if final_in != "--:--" and safe_to_minutes(final_in) > 480 and not is_night: late_status = "❌ สาย"
-            if "วันหยุด" in shift_info or final_in == "--:--": late_status = "➖"
+            if final_in != "--:--" and safe_to_minutes(final_in) > 480 and not is_night: 
+                late_status = "❌ สาย"
+            if "วันหยุด" in shift_info or final_in == "--:--": 
+                late_status = "➖"
 
-            full_msg = f"{'🌙' if is_night else '☀️'} *{'กะดึก' if is_night else 'กะเช้า'}* | {TARGET_DATE_STR}\n"
-            full_msg += f"👍 *เข้า:* {final_in}  👋 *ออก:* {final_out} [{late_status}]\n"
-            full_msg += f"🚀 *OT:* {'✅ ✅ ' if '✅' in ot_status else '➖ '}{ot_status}"
+            msg = f"{'🌙' if is_night else '☀️'} *{'กะดึก' if is_night else 'กะเช้า'}* | {TARGET_DATE_STR}\n"
+            msg += f"👍 *เข้า:* {final_in}  👋 *ออก:* {final_out} [{late_status}]\n"
+            msg += f"🚀 *OT:* {'✅ ✅ ' if '✅' in ot_status else '➖ '}{ot_status}"
             
             if target_dt.day == 17:
-                full_msg += "\n\n⚠️ *Note:* วันที่ 17 แล้ว! อย่าลืมเช็ค Biofsoft\n📢 ตรวจสอบความถูกต้องด้วยตนเองอีกครั้ง"
+                msg += "\n\n⚠️ *Note:* วันที่ 17 แล้ว! อย่าลืมเช็ค Biofsoft"
 
-            send_line_notification(full_msg)
+            send_line_notification(msg)
+            print("✅ ดำเนินการเสร็จสิ้น")
 
         except Exception as e:
-            print(f"❌ Error: {e}")
-            send_line_notification(f"❌ บอททำงานผิดพลาด: {str(e)[:100]}")
+            # --- จุดสำคัญ: ถ่ายรูปหน้าจอเมื่อพัง ---
+            await page.screenshot(path="error_debug.png", full_page=True)
+            error_msg = f"❌ บอททำงานผิดพลาด: {str(e)[:100]}"
+            print(error_msg)
+            send_line_notification(error_msg)
         finally:
             await browser.close()
 
