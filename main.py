@@ -6,31 +6,31 @@ import os
 from playwright.async_api import async_playwright
 from datetime import datetime, timedelta
 
+# พยายามโหลดไฟล์ .env สำหรับการรันในเครื่อง (Local)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # ตรวจสอบสถานที่รัน
 IS_GITHUB = "GITHUB_ACTIONS" in os.environ
 
 # ================= CONFIGURATION =================
 URL = "http://49.0.120.219:99/"
 
-if IS_GITHUB:
-    USER = os.getenv("BIO_USER")
-    PASS = os.getenv("BIO_PASS")
-    ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-    USER_ID = os.getenv("LINE_USER_ID")
-else:
-    # --- ใส่ข้อมูลของคุณตรงนี้สำหรับรันในคอมตัวเอง ---
-    USER = "01750"
-    PASS = "01750"
-    ACCESS_TOKEN = "g+SuHToVW2tfe1xaMnCaBpXcntd76+Psu1MXtVUk1wTSpZyRUs6rc2i/iI2kNWC80Rb6Jw7P6rU5P3rAoSXPegM8ijpa8Tr7aOeUr6Is5Kx/Eme3POogYxltROwj6zcT8sJawuFHL89eekAqreHtlgdB04t89/1O/w1cDnyilFU="
-    USER_ID = "U3a013094c7297e8b2ba3644e2da65d70"
+# ดึงค่าความลับจาก Environment Variables (.env หรือ GitHub Secrets)
+USER = os.getenv("BIO_USER")
+PASS = os.getenv("BIO_PASS")
+ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+USER_ID = os.getenv("LINE_USER_ID")
 
-# Logic การเลือกวันที่ (ใช้เวลาไทย)
-# บน GitHub เราจะตั้ง TZ: Asia/Bangkok ใน YAML ทำให้ datetime.now() ตรงกับไทย
+# Logic การเลือกวันที่ตรวจสอบ (ยึดตามเวลาไทยที่ตั้งใน YAML)
 now = datetime.now()
 if now.hour < 12:
-    target_dt = now - timedelta(days=1) # รอบ 10:00 เช็คเมื่อวาน
+    target_dt = now - timedelta(days=1) # รอบ 10:00 เช็คของเมื่อวาน
 else:
-    target_dt = now # รอบ 17:30, 22:00 เช็ควันนี้
+    target_dt = now # รอบ 17:30, 22:00 เช็คของวันนี้
 
 TARGET_DATE_STR = target_dt.strftime("%d/%m/%Y")
 # =================================================
@@ -42,6 +42,10 @@ THAI_MONTHS = {
 }
 
 def send_line_notification(message_text):
+    if not ACCESS_TOKEN or not USER_ID:
+        print("⚠️ ข้ามการส่ง LINE: ไม่พบ Token หรือ User ID")
+        return
+
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
         "Content-Type": "application/json",
@@ -81,15 +85,19 @@ def parse_thai_week(text):
     return None, None
 
 async def run_full_bot():
+    if not USER or not PASS:
+        print("❌ Error: ไม่พบข้อมูล Login (โปรดตรวจสอบ .env หรือ Secrets)")
+        return
+
     async with async_playwright() as p:
-        # ถ้ารันในคอมจะเปิดหน้าจอ (headless=False) ถ้ารันบน GitHub จะปิดหน้าจอ
+        # เปิดหน้าจอเมื่อรันในเครื่อง (Local) และปิดหน้าจอเมื่อรันบน Cloud (GitHub)
         browser = await p.chromium.launch(headless=IS_GITHUB, slow_mo=500 if not IS_GITHUB else 0)
         context = await browser.new_context(viewport={'width': 1366, 'height': 768})
         page = await context.new_page()
         page.set_default_timeout(60000)
 
         try:
-            print(f"🚀 เริ่มตรวจวันที่: {TARGET_DATE_STR} (โหมด: {'GitHub' if IS_GITHUB else 'Local'})")
+            print(f"🚀 เริ่มตรวจวันที่: {TARGET_DATE_STR} (โหมด: {'GitHub' if IS_GITHUB else 'Local Computer'})")
 
             # 1. LOGIN
             await page.goto(URL, wait_until="load")
@@ -175,25 +183,13 @@ async def run_full_bot():
                 ot_found = any(TARGET_DATE_STR in r for r in ot_rows_text)
                 ot_status = "✅ มีใบโอทีแล้ว" if ot_found else "❌ ไม่พบใบขอโอที"
 
-            # 5. สรุปผล
-            late_status = "✅ ไม่สาย"
-            if final_in != "--:--" and safe_to_minutes(final_in) > 480 and not is_night: late_status = "❌ สาย"
-            if "วันหยุด" in shift_info or final_in == "--:--": late_status = "➖"
-
-            full_msg = f"{'🌙' if is_night else '☀️'} *{'กะดึก' if is_night else 'กะเช้า'}* | {TARGET_DATE_STR}\n"
-            full_msg += f"👍 *เข้า:* {final_in}  👋 *ออก:* {final_out} [{late_status}]\n"
-            full_msg += f"🚀 *OT:* {'✅ ✅ ' if '✅' in ot_status else '➖ '}{ot_status}"
+            # 5. สรุปผล (แสดงสถานะวันหยุดชัดเจน)
+            is_holiday = "วันหยุด" in shift_info or final_in == "--:--"
             
-            if target_dt.day == 17:
-                full_msg += "\n\n⚠️ *Note:* วันที่ 17 แล้ว! อย่าลืมเช็ค Biofsoft"
-
-            send_line_notification(full_msg)
-
-        except Exception as e:
-            if IS_GITHUB: await page.screenshot(path="error_debug.png", full_page=True)
-            send_line_notification(f"❌ บอททำงานผิดพลาด: {str(e)[:100]}")
-        finally:
-            await browser.close()
-
-if __name__ == "__main__":
-    asyncio.run(run_full_bot())
+            if is_holiday:
+                late_status = "😴 วันหยุด/พักผ่อน"
+            else:
+                if final_in != "--:--" and safe_to_minutes(final_in) > 480 and not is_night:
+                    late_status = "❌ สาย"
+                else:
+                    late_
