@@ -1,0 +1,34 @@
+name: Biosoft Auto Check
+
+on:
+  schedule:
+    # รันเวลา 10:00, 17:30, 22:00 (เวลาไทย)
+    - cron: '0 3 * * *'    # 10:00 TH
+    - cron: '30 10 * * *'  # 17:30 TH
+    - cron: '0 15 * * *'   # 22:00 TH
+  workflow_dispatch: # เพื่อให้เรากดรันเองเพื่อทดสอบได้
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright requests
+          playwright install chromium
+
+      - name: Run Bot
+        env:
+          BIO_USER: ${{ secrets.BIO_USER }}
+          BIO_PASS: ${{ secrets.BIO_PASS }}
+          LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: python main.py
