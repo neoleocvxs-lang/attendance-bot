@@ -19,18 +19,18 @@ IS_GITHUB = "GITHUB_ACTIONS" in os.environ
 # ================= CONFIGURATION =================
 URL = "http://49.0.120.219:99/"
 
-# ดึงค่าความลับจาก Environment Variables (.env หรือ GitHub Secrets)
+# ดึงค่าความลับจาก Environment Variables
 USER = os.getenv("BIO_USER")
 PASS = os.getenv("BIO_PASS")
 ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 USER_ID = os.getenv("LINE_USER_ID")
 
-# Logic การเลือกวันที่ตรวจสอบ (ยึดตามเวลาไทยที่ตั้งใน YAML)
+# Logic การเลือกวันที่ตรวจสอบ
 now = datetime.now()
 if now.hour < 12:
-    target_dt = now - timedelta(days=1) # รอบ 10:00 เช็คของเมื่อวาน
+    target_dt = now - timedelta(days=1)  # เช็คของเมื่อวาน
 else:
-    target_dt = now # รอบ 17:30, 22:00 เช็คของวันนี้
+    target_dt = now  # เช็คของวันนี้
 
 TARGET_DATE_STR = target_dt.strftime("%d/%m/%Y")
 # =================================================
@@ -86,28 +86,32 @@ def parse_thai_week(text):
 
 async def run_full_bot():
     if not USER or not PASS:
-        print("❌ Error: ไม่พบข้อมูล Login (โปรดตรวจสอบ .env หรือ Secrets)")
+        print("❌ Error: ไม่พบข้อมูล Login")
         return
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=IS_GITHUB, slow_mo=500 if not IS_GITHUB else 0)
+        browser = await p.chromium.launch(
+            headless=IS_GITHUB, 
+            args=["--disable-save-password-bubble", "--disable-notifications"]
+        )
         context = await browser.new_context(viewport={'width': 1366, 'height': 768})
         page = await context.new_page()
         page.set_default_timeout(60000)
 
         try:
-            print(f"🚀 เริ่มตรวจวันที่: {TARGET_DATE_STR} (โหมด: {'GitHub' if IS_GITHUB else 'Local Computer'})")
+            print(f"🚀 เริ่มตรวจวันที่: {TARGET_DATE_STR}")
 
             # 1. LOGIN
             await page.goto(URL, wait_until="load")
             await page.fill('input[placeholder="Username"]', USER)
             await page.fill('input[placeholder="Password"]', PASS)
             await page.click('button:has-text("Login")')
+            await asyncio.sleep(2)
+            await page.keyboard.press("Escape")
             await page.wait_for_selector('small.ng-binding', timeout=60000)
             await asyncio.sleep(5)
 
-            # 2. ค้นหาข้อมูลกะงาน
-            shift_info = "ไม่พบข้อมูล"
+            # 2. ค้นหาข้อมูลกะงาน (ปรับปรุงใหม่: รองรับการยืมกะในวันหยุด)
             for _ in range(15):
                 all_smalls = await page.locator("small.ng-binding").all_inner_texts()
                 week_text = next((t.strip() for t in all_smalls if any(m in t for m in THAI_MONTHS.keys())), "")
@@ -122,10 +126,22 @@ async def run_full_bot():
                     await page.click('button[ng-click*="pre"]')
                     await asyncio.sleep(4)
 
-            day_abbr = target_dt.strftime("%a")
-            day_box = page.locator(f"#shiftblock li:has(span:has-text('{day_abbr}'))").first
-            shift_raw = await day_box.inner_text()
-            shift_info = shift_raw.replace(day_abbr.upper(), "").strip()
+            # --- LOGIC: ดึงข้อมูลกะงานแบบ 7 วันเพื่อรองรับวันหยุด ---
+            all_days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
+            weekly_shifts = []
+            for d_abbr in all_days:
+                box = page.locator(f"#shiftblock li:has(span:has-text('{d_abbr}'))").first
+                txt = (await box.inner_text()).replace(d_abbr, "").strip()
+                weekly_shifts.append({"day": d_abbr, "info": txt})
+
+            target_abbr = target_dt.strftime("%a").upper()
+            day_info = next((i["info"] for i in weekly_shifts if i["day"] == target_abbr), "")
+            
+            # ตัดสินใจ: ถ้าไม่มีตัวเลขเวลา ให้ยืมกะแรกของสัปดาห์ที่มีเวลามาใช้
+            if not (":" in day_info and any(c.isdigit() for c in day_info)):
+                shift_info = next((i["info"] for i in weekly_shifts if ":" in i["info"]), "ไม่พบข้อมูล")
+            else:
+                shift_info = day_info
 
             # 3. ดึงข้อมูลสแกนนิ้ว
             await page.click('span:has-text("ข้อมูลเวลา")')
@@ -166,24 +182,35 @@ async def run_full_bot():
                     out_candidates = [t for d, t in raw_times if TARGET_DATE_STR in d and safe_to_minutes(t) > (safe_to_minutes(final_in) + 30)]
                     final_out = out_candidates[-1] if out_candidates else "--:--"
 
-            # 4. ตรวจสอบใบ OT
+            # 4. ตรวจสอบใบ OT (ฟิกช่องที่ 5 - Index 4)
             ot_status = "ไม่ได้ทำ OT"
             is_doing_ot = False
             if final_out != "--:--":
                 out_h = int(final_out.split(":")[0])
-                if (is_night and (out_h >= 6 or out_h < 4)) or (not is_night and out_h >= 18): is_doing_ot = True
+                if (is_night and (out_h >= 6 or out_h < 4)) or (not is_night and out_h >= 18): 
+                    is_doing_ot = True
 
             if is_doing_ot:
                 await page.click('a:has-text("บันทึกขอทำโอที")')
                 await page.wait_for_selector('button[ng-click*="ChangMode(\'All\')"]')
                 await page.click('button[ng-click*="ChangMode(\'All\')"]')
                 await asyncio.sleep(3)
-                ot_rows_text = await page.locator("table tbody tr").all_inner_texts()
-                ot_found = any(TARGET_DATE_STR in r for r in ot_rows_text)
+                
+                ot_found = False
+                ot_rows = await page.query_selector_all("table tbody tr")
+                for row in ot_rows:
+                    cols = await row.query_selector_all("td")
+                    if len(cols) >= 5:
+                        work_date_col5 = (await cols[4].inner_text()).strip()
+                        if TARGET_DATE_STR in work_date_col5:
+                            ot_found = True
+                            break
                 ot_status = "✅ มีใบโอทีแล้ว" if ot_found else "❌ ไม่พบใบขอโอที"
 
-            # 5. สรุปผล (แสดงสถานะวันหยุดชัดเจน)
-            is_holiday = "วันหยุด" in shift_info or final_in == "--:--"
+            # 5. สรุปผล
+            is_holiday_label = any(kw in day_info for kw in ["วันหยุด", "วัน", " - "]) and not (":" in day_info)
+            is_holiday = is_holiday_label or final_in == "--:--"
+            
             if is_holiday:
                 late_status = "😴 วันหยุด/พักผ่อน"
             else:
