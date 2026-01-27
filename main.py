@@ -96,7 +96,9 @@ async def run_full_bot():
         )
         context = await browser.new_context(viewport={'width': 1366, 'height': 768})
         page = await context.new_page()
-        page.set_default_timeout(60000)
+        
+        # ตั้งค่า Default Timeout เป็น 90 วินาทีสำหรับทุกคำสั่ง
+        page.set_default_timeout(90000)
 
         try:
             print(f"🚀 เริ่มตรวจวันที่: {TARGET_DATE_STR}")
@@ -106,12 +108,22 @@ async def run_full_bot():
             await page.fill('input[placeholder="Username"]', USER)
             await page.fill('input[placeholder="Password"]', PASS)
             await page.click('button:has-text("Login")')
+            
+            # --- ระบบอึดพิเศษ: รอ Dashboard หลัง Login ---
+            try:
+                print("⏳ กำลังรอโหลดหน้า Dashboard...")
+                await page.wait_for_selector('small.ng-binding', timeout=60000)
+            except:
+                print("🔄 เว็บโหลดช้าผิดปกติ... กำลังลอง Refresh หน้าเว็บ 1 ครั้ง")
+                await page.reload()
+                # รอบนี้ให้โอกาสรอเพิ่มเป็น 2 นาที (120,000ms)
+                await page.wait_for_selector('small.ng-binding', timeout=120000)
+            
             await asyncio.sleep(2)
             await page.keyboard.press("Escape")
-            await page.wait_for_selector('small.ng-binding', timeout=60000)
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
 
-            # 2. ค้นหาข้อมูลกะงาน (ปรับปรุงใหม่: รองรับการยืมกะในวันหยุด)
+            # 2. ค้นหาข้อมูลกะงาน
             for _ in range(15):
                 all_smalls = await page.locator("small.ng-binding").all_inner_texts()
                 week_text = next((t.strip() for t in all_smalls if any(m in t for m in THAI_MONTHS.keys())), "")
@@ -126,7 +138,6 @@ async def run_full_bot():
                     await page.click('button[ng-click*="pre"]')
                     await asyncio.sleep(4)
 
-            # --- LOGIC: ดึงข้อมูลกะงานแบบ 7 วันเพื่อรองรับวันหยุด ---
             all_days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
             weekly_shifts = []
             for d_abbr in all_days:
@@ -137,7 +148,6 @@ async def run_full_bot():
             target_abbr = target_dt.strftime("%a").upper()
             day_info = next((i["info"] for i in weekly_shifts if i["day"] == target_abbr), "")
             
-            # ตัดสินใจ: ถ้าไม่มีตัวเลขเวลา ให้ยืมกะแรกของสัปดาห์ที่มีเวลามาใช้
             if not (":" in day_info and any(c.isdigit() for c in day_info)):
                 shift_info = next((i["info"] for i in weekly_shifts if ":" in i["info"]), "ไม่พบข้อมูล")
             else:
@@ -157,7 +167,8 @@ async def run_full_bot():
                 await page.press(selector, 'Enter')
 
             await page.click('h2:has-text("ตรวจสอบเวลาสแกนนิ้ว")')
-            await asyncio.sleep(10)
+            # รอโหลดตารางนานขึ้นนิดนึง
+            await asyncio.sleep(12)
 
             rows = await page.query_selector_all("table tbody tr")
             raw_times = []
@@ -182,7 +193,7 @@ async def run_full_bot():
                     out_candidates = [t for d, t in raw_times if TARGET_DATE_STR in d and safe_to_minutes(t) > (safe_to_minutes(final_in) + 30)]
                     final_out = out_candidates[-1] if out_candidates else "--:--"
 
-            # 4. ตรวจสอบใบ OT (ฟิกช่องที่ 5 - Index 4)
+            # 4. ตรวจสอบใบ OT
             ot_status = "ไม่ได้ทำ OT"
             is_doing_ot = False
             if final_out != "--:--":
@@ -194,7 +205,7 @@ async def run_full_bot():
                 await page.click('a:has-text("บันทึกขอทำโอที")')
                 await page.wait_for_selector('button[ng-click*="ChangMode(\'All\')"]')
                 await page.click('button[ng-click*="ChangMode(\'All\')"]')
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)
                 
                 ot_found = False
                 ot_rows = await page.query_selector_all("table tbody tr")
@@ -209,7 +220,7 @@ async def run_full_bot():
 
             # 5. สรุปผล
             is_holiday_label = any(kw in day_info for kw in ["วันหยุด", "วัน", " - "]) and not (":" in day_info)
-            is_holiday = is_holiday_label or final_in == "--:--"
+            is_holiday = is_holiday_label or (final_in == "--:--" and final_out == "--:--")
             
             if is_holiday:
                 late_status = "😴 วันหยุด/พักผ่อน"
@@ -230,8 +241,9 @@ async def run_full_bot():
 
         except Exception as e:
             if IS_GITHUB: await page.screenshot(path="error_debug.png", full_page=True)
-            print(f"❌ Error Detail: {e}")
-            send_line_notification(f"❌ บอททำงานผิดพลาด: {str(e)[:100]}")
+            err_msg = str(e)
+            print(f"❌ Error Detail: {err_msg}")
+            send_line_notification(f"❌ บอททำงานผิดพลาด: {err_msg[:100]}")
         finally:
             await browser.close()
 
