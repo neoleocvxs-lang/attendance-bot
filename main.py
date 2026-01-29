@@ -97,7 +97,7 @@ async def run_full_bot():
         context = await browser.new_context(viewport={'width': 1366, 'height': 768})
         page = await context.new_page()
         
-        # ตั้งค่า Default Timeout เป็น 90 วินาทีสำหรับทุกคำสั่ง
+        # ตั้งค่า Default Timeout เป็น 90 วินาที
         page.set_default_timeout(90000)
 
         try:
@@ -112,14 +112,17 @@ async def run_full_bot():
             # --- ระบบอึดพิเศษ: รอ Dashboard หลัง Login ---
             try:
                 print("⏳ กำลังรอโหลดหน้า Dashboard...")
+                # รอให้ข้อความช่วงวันที่ปรากฏขึ้นมาก่อน
                 await page.wait_for_selector('small.ng-binding', timeout=60000)
             except:
                 print("🔄 เว็บโหลดช้าผิดปกติ... กำลังลอง Refresh หน้าเว็บ 1 ครั้ง")
                 await page.reload()
-                # รอบนี้ให้โอกาสรอเพิ่มเป็น 2 นาที (120,000ms)
                 await page.wait_for_selector('small.ng-binding', timeout=120000)
             
-            await asyncio.sleep(2)
+            # เมื่อเห็นช่วงวันที่แล้ว ให้รออีก 10 วินาทีเพื่อให้ระบบนิ่งที่สุดตามที่ต้องการ
+            print("✅ เจอข้อมูลวันที่แล้ว... กำลังรออีก 10 วินาทีให้ระบบนิ่ง (Cool down)")
+            await asyncio.sleep(10)
+
             await page.keyboard.press("Escape")
             await asyncio.sleep(3)
 
@@ -133,10 +136,10 @@ async def run_full_bot():
                     if start_dt <= target_floor <= end_dt: break
                     elif target_floor < start_dt: await page.click('button[ng-click*="pre"]')
                     else: await page.click('button[ng-click*="next"]')
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(5) # เพิ่มเวลารอช่วงเปลี่ยนสัปดาห์
                 else:
                     await page.click('button[ng-click*="pre"]')
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(5)
 
             all_days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
             weekly_shifts = []
@@ -155,6 +158,7 @@ async def run_full_bot():
 
             # 3. ดึงข้อมูลสแกนนิ้ว
             await page.click('span:has-text("ข้อมูลเวลา")')
+            await asyncio.sleep(2) # รอเมนูกาง
             await page.click('a:has-text("แสดงข้อมูลการบันทึกเวลา")')
             await page.wait_for_selector('h2:has-text("ตรวจสอบเวลาสแกนนิ้ว")')
             await asyncio.sleep(5)
@@ -167,7 +171,6 @@ async def run_full_bot():
                 await page.press(selector, 'Enter')
 
             await page.click('h2:has-text("ตรวจสอบเวลาสแกนนิ้ว")')
-            # รอโหลดตารางนานขึ้นนิดนึง
             await asyncio.sleep(12)
 
             rows = await page.query_selector_all("table tbody tr")
