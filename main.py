@@ -6,34 +6,29 @@ import os
 from playwright.async_api import async_playwright
 from datetime import datetime, timedelta
 
-# พยายามโหลดไฟล์ .env สำหรับการรันในเครื่อง (Local)
+# Load .env for local testing
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
 
-# ตรวจสอบสถานที่รัน
 IS_GITHUB = "GITHUB_ACTIONS" in os.environ
-
-# ================= CONFIGURATION =================
 URL = "http://49.0.120.219:99/"
 
-# ดึงค่าความลับจาก Environment Variables
 USER = os.getenv("BIO_USER")
 PASS = os.getenv("BIO_PASS")
 ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 USER_ID = os.getenv("LINE_USER_ID")
 
-# Logic การเลือกวันที่ตรวจสอบ
+# Logic เลือกวันที่ตรวจสอบ (ถ้าเช้าก่อน 11 โมงให้เช็คของเมื่อวาน)
 now = datetime.now()
-if now.hour < 12:
-    target_dt = now - timedelta(days=1)  # เช็คของเมื่อวาน
+if now.hour < 11:
+    target_dt = now - timedelta(days=1)
 else:
-    target_dt = now  # เช็คของวันนี้
+    target_dt = now
 
 TARGET_DATE_STR = target_dt.strftime("%d/%m/%Y")
-# =================================================
 
 THAI_MONTHS = {
     "มกราคม": 1, "กุมภาพันธ์": 2, "มีนาคม": 3, "เมษายน": 4,
@@ -42,32 +37,22 @@ THAI_MONTHS = {
 }
 
 def send_line_notification(message_text):
-    if not ACCESS_TOKEN or not USER_ID:
-        print("⚠️ ข้ามการส่ง LINE: ไม่พบ Token หรือ User ID")
-        return
-
+    if not ACCESS_TOKEN or not USER_ID: return
     url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {ACCESS_TOKEN}"
-    }
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {ACCESS_TOKEN}"}
     payload = {"to": USER_ID, "messages": [{"type": "text", "text": message_text}]}
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload))
-        if response.status_code == 200:
-            print("✉️ ส่งแจ้งเตือนสำเร็จ!")
-        else:
-            print(f"⚠️ LINE ส่งไม่สำเร็จ: {response.text}")
-    except Exception as e:
-        print(f"❌ Error LINE: {e}")
+    try: requests.post(url, headers=headers, data=json.dumps(payload))
+    except: pass
 
 def safe_to_minutes(time_str):
     try:
-        if ":" in time_str:
-            h, m = map(int, time_str.split(":"))
-            return h * 60 + m
-    except: pass
-    return -1
+        h, m = map(int, time_str.split(":"))
+        return h * 60 + m
+    except: return -1
+
+def minutes_to_str(m_total):
+    if m_total < 0: return "--:--"
+    return f"{m_total // 60:02d}:{m_total % 60:02d}"
 
 def parse_thai_week(text):
     found_dates = []
@@ -81,53 +66,46 @@ def parse_thai_week(text):
                 if year > 2400: year -= 543 
                 found_dates.append(datetime(year, m_val, int(d)))
     if len(found_dates) >= 2:
-        found_dates.sort(); return found_dates[0], found_dates[-1]
+        found_dates.sort()
+        return found_dates[0], found_dates[-1]
     return None, None
 
 async def run_full_bot():
     if not USER or not PASS:
-        print("❌ Error: ไม่พบข้อมูล Login")
+        print("❌ Error: Missing Login Credentials")
         return
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=IS_GITHUB, 
-            args=["--disable-save-password-bubble", "--disable-notifications"]
+        browser = await p.chromium.launch(headless=IS_GITHUB)
+        context = await browser.new_context(
+            viewport={'width': 1366, 'height': 768},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
-        context = await browser.new_context(viewport={'width': 1366, 'height': 768})
         page = await context.new_page()
-        
-        # ตั้งค่า Default Timeout เป็น 90 วินาที
-        page.set_default_timeout(90000)
+        page.set_default_timeout(95000)
 
         try:
-            print(f"🚀 เริ่มตรวจวันที่: {TARGET_DATE_STR}")
-
-            # 1. LOGIN
+            print(f"🚀 เริ่มทำงานวันที่: {TARGET_DATE_STR}")
+            
+            # 1. Login
             await page.goto(URL, wait_until="load")
             await page.fill('input[placeholder="Username"]', USER)
             await page.fill('input[placeholder="Password"]', PASS)
             await page.click('button:has-text("Login")')
             
-            # --- ระบบอึดพิเศษ: รอ Dashboard หลัง Login ---
+            # รอ Dashboard
             try:
-                print("⏳ กำลังรอโหลดหน้า Dashboard...")
-                # รอให้ข้อความช่วงวันที่ปรากฏขึ้นมาก่อน
                 await page.wait_for_selector('small.ng-binding', timeout=60000)
             except:
-                print("🔄 เว็บโหลดช้าผิดปกติ... กำลังลอง Refresh หน้าเว็บ 1 ครั้ง")
+                print("🔄 ไม่เจอ Dashboard ใน 60 วิ... กำลังลอง Refresh")
                 await page.reload()
-                await page.wait_for_selector('small.ng-binding', timeout=120000)
+                await page.wait_for_selector('small.ng-binding', timeout=60000)
             
-            # เมื่อเห็นช่วงวันที่แล้ว ให้รออีก 10 วินาทีเพื่อให้ระบบนิ่งที่สุดตามที่ต้องการ
-            print("✅ เจอข้อมูลวันที่แล้ว... กำลังรออีก 10 วินาทีให้ระบบนิ่ง (Cool down)")
-            await asyncio.sleep(10)
-
+            await asyncio.sleep(10) # รอให้นิ่งตามรีเควส
             await page.keyboard.press("Escape")
-            await asyncio.sleep(3)
 
-            # 2. ค้นหาข้อมูลกะงาน
-            for _ in range(15):
+            # 2. ค้นหาสัปดาห์
+            for _ in range(12):
                 all_smalls = await page.locator("small.ng-binding").all_inner_texts()
                 week_text = next((t.strip() for t in all_smalls if any(m in t for m in THAI_MONTHS.keys())), "")
                 start_dt, end_dt = parse_thai_week(week_text)
@@ -136,29 +114,17 @@ async def run_full_bot():
                     if start_dt <= target_floor <= end_dt: break
                     elif target_floor < start_dt: await page.click('button[ng-click*="pre"]')
                     else: await page.click('button[ng-click*="next"]')
-                    await asyncio.sleep(5) # เพิ่มเวลารอช่วงเปลี่ยนสัปดาห์
-                else:
-                    await page.click('button[ng-click*="pre"]')
                     await asyncio.sleep(5)
+                else: break
 
-            all_days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
-            weekly_shifts = []
-            for d_abbr in all_days:
-                box = page.locator(f"#shiftblock li:has(span:has-text('{d_abbr}'))").first
-                txt = (await box.inner_text()).replace(d_abbr, "").strip()
-                weekly_shifts.append({"day": d_abbr, "info": txt})
-
+            # ดึงข้อมูลกะ
             target_abbr = target_dt.strftime("%a").upper()
-            day_info = next((i["info"] for i in weekly_shifts if i["day"] == target_abbr), "")
-            
-            if not (":" in day_info and any(c.isdigit() for c in day_info)):
-                shift_info = next((i["info"] for i in weekly_shifts if ":" in i["info"]), "ไม่พบข้อมูล")
-            else:
-                shift_info = day_info
+            box = page.locator(f"#shiftblock li:has(span:has-text('{target_abbr}'))").first
+            shift_info = (await box.inner_text()).replace(target_abbr, "").strip()
 
-            # 3. ดึงข้อมูลสแกนนิ้ว
+            # 3. ดึงเวลาสแกนนิ้ว
             await page.click('span:has-text("ข้อมูลเวลา")')
-            await asyncio.sleep(2) # รอเมนูกาง
+            await asyncio.sleep(3)
             await page.click('a:has-text("แสดงข้อมูลการบันทึกเวลา")')
             await page.wait_for_selector('h2:has-text("ตรวจสอบเวลาสแกนนิ้ว")')
             await asyncio.sleep(5)
@@ -169,9 +135,9 @@ async def run_full_bot():
                 await page.evaluate(f'document.querySelector(\'{selector}\').removeAttribute("readonly")')
                 await page.fill(selector, val)
                 await page.press(selector, 'Enter')
-
+            
             await page.click('h2:has-text("ตรวจสอบเวลาสแกนนิ้ว")')
-            await asyncio.sleep(12)
+            await asyncio.sleep(15) # รอตารางโหลด
 
             rows = await page.query_selector_all("table tbody tr")
             raw_times = []
@@ -182,71 +148,62 @@ async def run_full_bot():
                     if ":" in t_in: raw_times.append((d, t_in))
                     if ":" in t_out: raw_times.append((d, t_out))
 
+            # --- Smart Filtering Logic ---
             final_in, final_out = "--:--", "--:--"
             is_night = "20:00" in shift_info
-            if is_night:
-                in_c = [t for d, t in raw_times if TARGET_DATE_STR in d and safe_to_minutes(t) >= 1020]
-                final_in = in_c[0] if in_c else "--:--"
-                out_c = [t for d, t in raw_times if next_day_str in d and 240 <= safe_to_minutes(t) <= 600]
-                final_out = out_c[0] if out_c else "--:--"
-            else:
-                in_c = [t for d, t in raw_times if TARGET_DATE_STR in d and 360 <= safe_to_minutes(t) <= 600]
-                final_in = in_c[0] if in_c else "--:--"
-                if final_in != "--:--":
-                    out_candidates = [t for d, t in raw_times if TARGET_DATE_STR in d and safe_to_minutes(t) > (safe_to_minutes(final_in) + 30)]
-                    final_out = out_candidates[-1] if out_candidates else "--:--"
+            today_minutes = [safe_to_minutes(t) for d, t in raw_times if TARGET_DATE_STR in d]
+            next_day_minutes = [safe_to_minutes(t) for d, t in raw_times if next_day_str in d]
 
-            # 4. ตรวจสอบใบ OT
+            if is_night:
+                in_candidates = [m for m in today_minutes if m >= 1020]
+                final_in = minutes_to_str(min(in_candidates)) if in_candidates else "--:--"
+                out_candidates = [m for m in next_day_minutes if 240 <= m <= 660]
+                final_out = minutes_to_str(max(out_candidates)) if out_candidates else "--:--"
+            else:
+                # กะเช้า: เลือกตัวสุดท้ายในช่วงเช้า (กรณีสแกนซ้ำหลายรอบ)
+                in_candidates = [m for m in today_minutes if 360 <= m <= 600]
+                final_in = minutes_to_str(max(in_candidates)) if in_candidates else "--:--"
+                # เวลาออก: เลือกตัวสุดท้ายของวันหลังบ่ายสาม
+                out_candidates = [m for m in today_minutes if m >= 900]
+                final_out = minutes_to_str(max(out_candidates)) if out_candidates else "--:--"
+
+            # 4. ตรวจใบ OT
             ot_status = "ไม่ได้ทำ OT"
-            is_doing_ot = False
             if final_out != "--:--":
                 out_h = int(final_out.split(":")[0])
-                if (is_night and (out_h >= 6 or out_h < 4)) or (not is_night and out_h >= 18): 
-                    is_doing_ot = True
+                if (is_night and (out_h >= 6 or out_h < 4)) or (not is_night and out_h >= 18):
+                    await page.click('a:has-text("บันทึกขอทำโอที")')
+                    await page.wait_for_selector('button[ng-click*="ChangMode(\'All\')"]')
+                    await page.click('button[ng-click*="ChangMode(\'All\')"]')
+                    await asyncio.sleep(5)
+                    ot_rows = await page.query_selector_all("table tbody tr")
+                    found_ot = any(TARGET_DATE_STR in (await r.inner_text()) for r in ot_rows)
+                    ot_status = "✅ มีใบโอทีแล้ว" if found_ot else "❌ ไม่พบใบขอโอที"
 
-            if is_doing_ot:
-                await page.click('a:has-text("บันทึกขอทำโอที")')
-                await page.wait_for_selector('button[ng-click*="ChangMode(\'All\')"]')
-                await page.click('button[ng-click*="ChangMode(\'All\')"]')
-                await asyncio.sleep(5)
-                
-                ot_found = False
-                ot_rows = await page.query_selector_all("table tbody tr")
-                for row in ot_rows:
-                    cols = await row.query_selector_all("td")
-                    if len(cols) >= 5:
-                        work_date_col5 = (await cols[4].inner_text()).strip()
-                        if TARGET_DATE_STR in work_date_col5:
-                            ot_found = True
-                            break
-                ot_status = "✅ มีใบโอทีแล้ว" if ot_found else "❌ ไม่พบใบขอโอที"
-
-            # 5. สรุปผล
-            is_holiday_label = any(kw in day_info for kw in ["วันหยุด", "วัน", " - "]) and not (":" in day_info)
-            is_holiday = is_holiday_label or (final_in == "--:--" and final_out == "--:--")
+            # 5. สรุปผล (ปรับการแสดงผลวันหยุดตามรีเควส)
+            is_holiday_text = any(k in shift_info for k in ["วันหยุด", "พักผ่อน"]) or not (":" in shift_info)
             
-            if is_holiday:
-                late_status = "😴 วันหยุด/พักผ่อน"
+            if is_holiday_text:
+                msg = f"😴 *วันหยุด/พักผ่อน* | {TARGET_DATE_STR}\n"
+                late_status = "😴 พักผ่อน"
             else:
-                if final_in != "--:--" and safe_to_minutes(final_in) > 480 and not is_night:
+                display_shift = "กะดึก" if is_night else "กะเช้า"
+                display_icon = "🌙" if is_night else "☀️"
+                late_status = "✅ ไม่สาย"
+                if final_in != "--:--" and not is_night and safe_to_minutes(final_in) > 480:
                     late_status = "❌ สาย"
-                else:
-                    late_status = "✅ ไม่สาย"
+                msg = f"{display_icon} *{display_shift}* | {TARGET_DATE_STR}\n"
 
-            full_msg = f"{'🌙' if is_night else '☀️'} *{'กะดึก' if is_night else 'กะเช้า'}* | {TARGET_DATE_STR}\n"
-            full_msg += f"👍 *เข้า:* {final_in}  👋 *ออก:* {final_out} [{late_status}]\n"
-            full_msg += f"🚀 *OT:* {'✅ ✅ ' if '✅' in ot_status else '➖ '}{ot_status}"
+            msg += f"👍 *เข้า:* {final_in}  👋 *out:* {final_out} [{late_status}]\n"
+            msg += f"🚀 *OT:* {'✅ ✅ ' if '✅' in ot_status else '➖ '}{ot_status}"
             
-            if target_dt.day == 17:
-                full_msg += "\n\n⚠️ *Note:* วันที่ 17 แล้ว! อย่าลืมเช็ค Biofsoft"
-
-            send_line_notification(full_msg)
+            send_line_notification(msg)
+            print("✉️ แจ้งเตือนสำเร็จ!")
 
         except Exception as e:
-            if IS_GITHUB: await page.screenshot(path="error_debug.png", full_page=True)
-            err_msg = str(e)
-            print(f"❌ Error Detail: {err_msg}")
-            send_line_notification(f"❌ บอททำงานผิดพลาด: {err_msg[:100]}")
+            err_msg = str(e)[:100]
+            print(f"❌ Error: {err_msg}")
+            send_line_notification(f"❌ บอททำงานผิดพลาด: {err_msg}")
         finally:
             await browser.close()
 
