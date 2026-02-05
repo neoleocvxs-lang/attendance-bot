@@ -21,12 +21,9 @@ PASS = os.getenv("BIO_PASS")
 ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 USER_ID = os.getenv("LINE_USER_ID")
 
-# ตั้งค่าเวลาปัจจุบัน
 now = datetime.now()
 current_hour = now.hour
-current_min = now.minute
 
-# Logic เลือกวันที่ตรวจสอบ
 if current_hour < 11:
     target_dt = now - timedelta(days=1)
 else:
@@ -77,15 +74,11 @@ def parse_thai_week(text):
 async def run_full_bot():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=IS_GITHUB)
-        context = await browser.new_context(
-            viewport={'width': 1366, 'height': 768},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+        context = await browser.new_context(viewport={'width': 1366, 'height': 768})
         page = await context.new_page()
         page.set_default_timeout(95000)
 
         try:
-            # 1. Login
             await page.goto(URL, wait_until="load")
             await page.fill('input[placeholder="Username"]', USER)
             await page.fill('input[placeholder="Password"]', PASS)
@@ -100,12 +93,17 @@ async def run_full_bot():
             await asyncio.sleep(10)
             await page.keyboard.press("Escape")
 
-            # 2. ค้นหาสัปดาห์ (Fixed Iterator Bug)
+            # --- จุดที่แก้ไข: ดึงสัปดาห์แบบ List (Fixed Iterator Bug) ---
             for _ in range(12):
                 elements = page.locator("small.ng-binding")
-                count = await elements.count()
-                all_smalls = [await elements.nth(i).inner_text() for i in range(count)]
-                week_text = next((t.strip() for t in all_smalls if any(m in t for m in THAI_MONTHS.keys())), "")
+                all_smalls = await elements.all_inner_texts() # ใช้ Await เพื่อดึงค่าเป็น List
+                
+                week_text = ""
+                for t in all_smalls:
+                    if any(m in t for m in THAI_MONTHS.keys()):
+                        week_text = t.strip()
+                        break
+                
                 start_dt, end_dt = parse_thai_week(week_text)
                 if start_dt and end_dt:
                     target_floor = target_dt.replace(hour=0, minute=0, second=0)
@@ -115,19 +113,15 @@ async def run_full_bot():
                     await asyncio.sleep(5)
                 else: break
 
-            # ดึงกะ
             target_abbr = target_dt.strftime("%a").upper()
             box = page.locator(f"#shiftblock li:has(span:has-text('{target_abbr}'))").first
             shift_info = (await box.inner_text()).replace(target_abbr, "").strip()
             is_night = "20:00" in shift_info
             is_holiday = any(k in shift_info for k in ["วันหยุด", "พักผ่อน"]) or not (":" in shift_info)
 
-            # --- Logic งดส่งสำหรับกะดึกรอบ 17:05 ---
-            if is_night and current_hour == 17:
-                print("🌙 กะดึก: งดส่งรอบ 17:05 (ยังไม่ถึงเวลาเข้างาน)")
-                return
+            # Logic งดส่งกะดึกรอบ 17:05
+            if is_night and current_hour == 17: return
 
-            # 3. ดึงเวลาสแกนนิ้ว
             await page.click('span:has-text("ข้อมูลเวลา")')
             await asyncio.sleep(3)
             await page.click('a:has-text("แสดงข้อมูลการบันทึกเวลา")')
@@ -153,7 +147,6 @@ async def run_full_bot():
                     if ":" in t_in: raw_times.append((d, t_in))
                     if ":" in t_out: raw_times.append((d, t_out))
 
-            # Smart Filtering
             final_in, final_out = "--:--", "--:--"
             today_minutes = [safe_to_minutes(t) for d, t in raw_times if TARGET_DATE_STR in d]
             next_day_minutes = [safe_to_minutes(t) for d, t in raw_times if next_day_str in d]
@@ -169,19 +162,13 @@ async def run_full_bot():
                 out_candidates = [m for m in today_minutes if m >= 900]
                 final_out = minutes_to_str(max(out_candidates)) if out_candidates else "--:--"
 
-            # --- Logic กะเช้า: 17:05 ต้องมีเวลาออกถึงส่ง / 20:05 ไม่ส่งซ้ำถ้าส่งไปแล้วตอน 17:00 ---
+            # Logic งดส่งซ้ำซ้อน
             if not is_night and not is_holiday:
-                if current_hour == 17 and final_out == "--:--":
-                    print("☀️ กะเช้า: 17:05 ยังไม่มีเวลาออก งดส่ง")
-                    return
-                # รอบ 20:05: ถ้าเวลาออกคือช่วง 16:30-17:30 (ซึ่งน่าจะส่งไปแล้วตอน 17:05)
+                if current_hour == 17 and final_out == "--:--": return
                 if current_hour == 20 and final_out != "--:--":
                     out_min = safe_to_minutes(final_out)
-                    if 990 <= out_min <= 1050: # ระหว่าง 16:30 - 17:30
-                        print("☀️ กะเช้า: ส่งไปแล้วรอบ 17:05 งดส่งซ้ำ")
-                        return
+                    if 990 <= out_min <= 1050: return
 
-            # 4. ตรวจใบ OT
             ot_status = "ไม่ได้ทำ OT"
             if final_out != "--:--":
                 out_h = int(final_out.split(":")[0])
@@ -194,7 +181,7 @@ async def run_full_bot():
                     found_ot = any(TARGET_DATE_STR in (await r.inner_text()) for r in ot_rows)
                     ot_status = "✅ มีใบโอทีแล้ว" if found_ot else "❌ ไม่พบใบขอโอที"
 
-            # 5. สรุปผล
+            # สรุปผล (เอาสาย/ไม่สายออกตามสั่ง)
             if is_holiday:
                 msg = f"😴 *วันหยุด/พักผ่อน* | {TARGET_DATE_STR}\n"
             else:
