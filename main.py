@@ -24,10 +24,11 @@ USER_ID = os.getenv("LINE_USER_ID")
 now = datetime.now()
 current_hour = now.hour
 
-if current_hour < 11:
-    target_dt = now - timedelta(days=1)
+# --- [ปรับปรุง] Logic เลือกวันที่ตรวจสอบ (จุดตัด 09:00 น.) ---
+if current_hour < 9:
+    target_dt = now - timedelta(days=1) # ก่อนเก้าโมงเช็คของเมื่อวาน (กะดึกเลิกงาน)
 else:
-    target_dt = now
+    target_dt = now # หลังเก้าโมงเช็คของวันนี้ (กะเช้าเข้างาน / กะดึกเริ่มคืนนี้)
 
 TARGET_DATE_STR = target_dt.strftime("%d/%m/%Y")
 
@@ -79,6 +80,7 @@ async def run_full_bot():
         page.set_default_timeout(95000)
 
         try:
+            # 1. Login
             await page.goto(URL, wait_until="load")
             await page.fill('input[placeholder="Username"]', USER)
             await page.fill('input[placeholder="Password"]', PASS)
@@ -93,15 +95,16 @@ async def run_full_bot():
             await asyncio.sleep(10)
             await page.keyboard.press("Escape")
 
-            # --- จุดที่แก้ไข: ดึงสัปดาห์แบบ List (Fixed Iterator Bug) ---
+            # 2. ค้นหาสัปดาห์ (Stable Iterator)
             for _ in range(12):
                 elements = page.locator("small.ng-binding")
-                all_smalls = await elements.all_inner_texts() # ใช้ Await เพื่อดึงค่าเป็น List
+                count = await elements.count()
                 
                 week_text = ""
-                for t in all_smalls:
-                    if any(m in t for m in THAI_MONTHS.keys()):
-                        week_text = t.strip()
+                for i in range(count):
+                    txt = await elements.nth(i).inner_text()
+                    if any(m in txt for m in THAI_MONTHS.keys()):
+                        week_text = txt.strip()
                         break
                 
                 start_dt, end_dt = parse_thai_week(week_text)
@@ -119,9 +122,12 @@ async def run_full_bot():
             is_night = "20:00" in shift_info
             is_holiday = any(k in shift_info for k in ["วันหยุด", "พักผ่อน"]) or not (":" in shift_info)
 
-            # Logic งดส่งกะดึกรอบ 17:05
-            if is_night and current_hour == 17: return
-
+            # --- [ปรับปรุง] Logic การงดส่งข้อความ (Suppress Notification) ---
+            if is_night:
+                # กะดึก: งดส่งรอบเช้า (10:00) และเย็น (17:00) เพราะไม่มีข้อมูลสำคัญ
+                if current_hour in [10, 17]: return
+            
+            # 3. ดึงเวลาสแกนนิ้ว
             await page.click('span:has-text("ข้อมูลเวลา")')
             await asyncio.sleep(3)
             await page.click('a:has-text("แสดงข้อมูลการบันทึกเวลา")')
@@ -162,13 +168,16 @@ async def run_full_bot():
                 out_candidates = [m for m in today_minutes if m >= 900]
                 final_out = minutes_to_str(max(out_candidates)) if out_candidates else "--:--"
 
-            # Logic งดส่งซ้ำซ้อน
+            # --- [ปรับปรุง] Logic งดส่งซ้ำซ้อนสำหรับกะเช้า ---
             if not is_night and not is_holiday:
+                # รอบเย็น (17:00): ถ้ายังไม่สแกนออก (อาจทำโอที) ให้รอส่งรอบทุ่ม/สองทุ่ม
                 if current_hour == 17 and final_out == "--:--": return
+                # รอบค่ำ (20:00): ถ้าออกเวลาปกติ (แจ้งไปแล้วตอนเย็น) ไม่ต้องส่งซ้ำ
                 if current_hour == 20 and final_out != "--:--":
                     out_min = safe_to_minutes(final_out)
                     if 990 <= out_min <= 1050: return
 
+            # 4. ตรวจใบ OT (เจาะจงช่องที่ 5)
             ot_status = "ไม่ได้ทำ OT"
             if final_out != "--:--":
                 out_h = int(final_out.split(":")[0])
@@ -176,12 +185,20 @@ async def run_full_bot():
                     await page.click('a:has-text("บันทึกขอทำโอที")')
                     await page.wait_for_selector('button[ng-click*="ChangMode(\'All\')"]')
                     await page.click('button[ng-click*="ChangMode(\'All\')"]')
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(7) 
+                    
                     ot_rows = await page.query_selector_all("table tbody tr")
-                    found_ot = any(TARGET_DATE_STR in (await r.inner_text()) for r in ot_rows)
+                    found_ot = False
+                    for row in ot_rows:
+                        cols = await row.query_selector_all("td")
+                        if len(cols) >= 5:
+                            date_in_col = (await cols[4].inner_text()).strip()
+                            if TARGET_DATE_STR in date_in_col:
+                                found_ot = True
+                                break
                     ot_status = "✅ มีใบโอทีแล้ว" if found_ot else "❌ ไม่พบใบขอโอที"
 
-            # สรุปผล (เอาสาย/ไม่สายออกตามสั่ง)
+            # 5. สรุปผล
             if is_holiday:
                 msg = f"😴 *วันหยุด/พักผ่อน* | {TARGET_DATE_STR}\n"
             else:
