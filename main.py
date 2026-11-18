@@ -25,7 +25,7 @@ now = datetime.now()
 current_hour = now.hour
 
 # --- [ปรับปรุง] Logic เลือกวันที่ตรวจสอบ (จุดตัด 09:00 น.) ---
-if current_hour < 9:
+if current_hour < 10:
     target_dt = now - timedelta(days=1) # ก่อนเก้าโมงเช็คของเมื่อวาน (กะดึกเลิกงาน)
 else:
     target_dt = now # หลังเก้าโมงเช็คของวันนี้ (กะเช้าเข้างาน / กะดึกเริ่มคืนนี้)
