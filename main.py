@@ -177,23 +177,41 @@ async def run_full_bot():
                     out_min = safe_to_minutes(final_out)
                     if 990 <= out_min <= 1050: return
 
-            # 4. ตรวจใบ OT (เจาะจงช่องที่ 5)
+        # 4. ตรวจใบ OT (เพิ่มขั้นตอนกรอกวันที่ค้นหาเหมือนหน้าสแกนนิ้ว)
             ot_status = "ไม่ได้ทำ OT"
             if final_out != "--:--":
                 out_h = int(final_out.split(":")[0])
-                if (is_night and (out_h >= 6 or out_h < 4)) or (not is_night and out_h >= 18):
+                if (is_night and (out_h >= 6 or out_h <= 5)) or (not is_night and out_h >= 18):
                     await page.click('a:has-text("บันทึกขอทำโอที")')
                     await page.wait_for_selector('button[ng-click*="ChangMode(\'All\')"]')
                     await page.click('button[ng-click*="ChangMode(\'All\')"]')
+                    await asyncio.sleep(3) 
+                    
+                    # --- [เพิ่มใหม่] กรอกช่วงวันที่ในหน้า OT เหมือนกับหน้าสแกนนิ้ว ---
+                    for model, val in [("fromDate", TARGET_DATE_STR), ("toDate", next_day_str)]:
+                        selector = f'input[ng-model="{model}"]'
+                        try:
+                            await page.evaluate(f'document.querySelector(\'{selector}\').removeAttribute("readonly")')
+                            await page.fill(selector, val)
+                            await page.press(selector, 'Enter')
+                        except:
+                            pass
+                    
+                    # คลิกปุ่มค้นหาหรือรอโหลดข้อมูลตารางหลังกรอกวันที่
                     await asyncio.sleep(7) 
+                    # -------------------------------------------------------------
                     
                     ot_rows = await page.query_selector_all("table tbody tr")
                     found_ot = False
                     for row in ot_rows:
                         cols = await row.query_selector_all("td")
-                        if len(cols) >= 5:
-                            date_in_col = (await cols[4].inner_text()).strip()
-                            if TARGET_DATE_STR in date_in_col:
+                        if len(cols) >= 4:
+                            # เช็คกวาดหาในแถว หรือระบุช่อง cols[3] ตามโครงสร้างใหม่
+                            row_text = ""
+                            for c in cols:
+                                row_text += (await c.inner_text()) + " "
+                                
+                            if TARGET_DATE_STR in row_text:
                                 found_ot = True
                                 break
                     ot_status = "✅ มีใบโอทีแล้ว" if found_ot else "❌ ไม่พบใบขอโอที"
